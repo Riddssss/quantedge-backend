@@ -13,12 +13,14 @@ from transformer import generate_transformer_signals
 
 app = FastAPI(title="Trading Strategy API")
 
-# Allow Lovable frontend to call this API
+# Allow all origins — fixes CORS error from localhost
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 # In-memory cache — avoids re-downloading data every request
@@ -68,6 +70,21 @@ def root():
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.options("/api/optimize")
+def options_optimize():
+    return {}
+
+
+@app.options("/api/paper-trade")
+def options_paper_trade():
+    return {}
+
+
+@app.options("/api/transformer-window")
+def options_transformer_window():
+    return {}
 
 
 @app.post("/api/optimize")
