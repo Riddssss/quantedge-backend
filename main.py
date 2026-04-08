@@ -27,22 +27,23 @@ app.add_middleware(
 _cache = {}
 
 
-def get_data():
-    """Load and cache Bank Nifty data"""
-    if 'ready' not in _cache:
-        print("Fetching Bank Nifty data from Yahoo Finance...")
-        df = fetch_data()
+def get_data(start_date="2007-01-01", end_date="2025-06-01"):
+    cache_key = f"data_{start_date}_{end_date}"
+    if cache_key not in _cache:
+        print(f"Fetching Bank Nifty data {start_date} to {end_date}...")
+        df = fetch_data(start=start_date, end=end_date)
         (train_df, val_df, test_df,
          train_scaled, val_scaled,
          test_scaled, scaler) = prepare_data(df)
-        _cache['train_df']     = train_df
-        _cache['val_df']       = val_df
-        _cache['test_df']      = test_df
-        _cache['train_scaled'] = train_scaled
-        _cache['test_scaled']  = test_scaled
-        _cache['ready']        = True
+        _cache[cache_key] = {
+            'train_df'     : train_df,
+            'val_df'       : val_df,
+            'test_df'      : test_df,
+            'train_scaled' : train_scaled,
+            'test_scaled'  : test_scaled,
+        }
         print(f"Data ready — {len(df)} rows loaded")
-    return _cache
+    return _cache[cache_key]
 
 
 # ── Request body models ───────────────────────────────────────
@@ -52,6 +53,8 @@ class OptimizeRequest(BaseModel):
     generations     : Optional[int]  = 40
     use_transformer : Optional[bool] = True
     seq_len         : Optional[int]  = 60
+    start_date      : Optional[str]  = "2007-01-01"
+    end_date        : Optional[str]  = "2025-06-01"
 
 
 class PaperTradeRequest(BaseModel):
@@ -93,7 +96,10 @@ def optimize(req: OptimizeRequest):
     Main endpoint — runs GA + PSO and returns results
     Takes ~5 minutes for pop_size=50, generations=40
     """
-    cache    = get_data()
+    cache    = get_data(
+        start_date=req.start_date,
+        end_date=req.end_date
+    )
     train_df = cache['train_df'].copy()
     test_df  = cache['test_df'].copy()
 
@@ -145,6 +151,7 @@ def optimize(req: OptimizeRequest):
     _cache['pso_chrom']       = pso_chrom
     _cache['use_transformer'] = req.use_transformer
     _cache['test_df']         = test_df
+    _cache['ready']           = True
 
     return {
         "ga"          : {**ga_result,  "history": ga_history},
@@ -153,7 +160,9 @@ def optimize(req: OptimizeRequest):
             "total_return": round(bh_return, 2),
             "portfolio"   : bh_port
         },
-        "dates": ga_result['dates']
+        "dates"      : ga_result['dates'],
+        "start_date" : req.start_date,
+        "end_date"   : req.end_date
     }
 
 
