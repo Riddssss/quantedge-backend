@@ -26,18 +26,27 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
-# In-memory cache — avoids re-downloading data every request
-_cache = {}
+# Sector symbol mapping
+SECTOR_NAMES = {
+    "^NSEBANK"   : "Bank Nifty",
+    "^CNXIT"     : "Nifty IT",
+    "^NSEI"      : "Nifty 50",
+    "^CNXPHARMA" : "Nifty Pharma",
+    "^CNXAUTO"   : "Nifty Auto",
+}
 
-# Live signal cache
-_live_cache = {"data": None, "timestamp": None}
+# In-memory cache
+_cache      = {}
+_live_cache = {}
 
 
-def get_data(start_date="2007-01-01", end_date="2025-06-01"):
-    cache_key = f"data_{start_date}_{end_date}"
+def get_data(start_date="2007-01-01", end_date="2025-06-01",
+             sector="^NSEBANK"):
+    cache_key = f"data_{sector}_{start_date}_{end_date}"
     if cache_key not in _cache:
-        print(f"Fetching Bank Nifty data {start_date} to {end_date}...")
-        df = fetch_data(start=start_date, end=end_date)
+        sector_name = SECTOR_NAMES.get(sector, sector)
+        print(f"Fetching {sector_name} data {start_date} to {end_date}...")
+        df = fetch_data(symbol=sector, start=start_date, end=end_date)
         (train_df, val_df, test_df,
          train_scaled, val_scaled,
          test_scaled, scaler) = prepare_data(df)
@@ -61,6 +70,7 @@ class OptimizeRequest(BaseModel):
     seq_len         : Optional[int]  = 60
     start_date      : Optional[str]  = "2007-01-01"
     end_date        : Optional[str]  = "2025-06-01"
+    sector          : Optional[str]  = "^NSEBANK"
 
 
 class PaperTradeRequest(BaseModel):
@@ -79,6 +89,17 @@ def root():
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/sectors")
+def get_sectors():
+    """Return available sectors"""
+    return {
+        "sectors": [
+            {"symbol": k, "name": v}
+            for k, v in SECTOR_NAMES.items()
+        ]
+    }
 
 
 @app.options("/api/optimize")
@@ -102,20 +123,22 @@ def options_live_signal():
 
 
 @app.get("/api/live-signal")
-def live_signal():
-    """Get today's live market signal for Bank Nifty"""
+def live_signal(sector: str = "^NSEBANK"):
+    """Get today's live market signal for selected sector"""
 
     # Return cached if less than 1 hour old
-    if (_live_cache["data"] is not None and
-            _live_cache["timestamp"] is not None and
-            time.time() - _live_cache["timestamp"] < 3600):
-        print("Returning cached live signal...")
-        return _live_cache["data"]
+    cache_key = f"live_{sector}"
+    if (cache_key in _live_cache and
+            _live_cache[cache_key].get("timestamp") is not None and
+            time.time() - _live_cache[cache_key]["timestamp"] < 3600):
+        print(f"Returning cached live signal for {sector}...")
+        return _live_cache[cache_key]["data"]
 
     # Fetch latest data up to today
-    today = str(date.today())
-    print(f"Fetching live Bank Nifty data up to {today}...")
-    df = fetch_data(start="2020-01-01", end=today)
+    today       = str(date.today())
+    sector_name = SECTOR_NAMES.get(sector, sector)
+    print(f"Fetching live {sector_name} data up to {today}...")
+    df = fetch_data(symbol=sector, start="2020-01-01", end=today)
     df = add_indicators(df)
     df = df.dropna().reset_index(drop=True)
 
@@ -146,16 +169,18 @@ def live_signal():
 
     # Count bullish signals
     bullish = 0
-    if ma_cross   == "Bullish":  bullish += 1
-    if rsi_signal == "Oversold": bullish += 1
-    if macd_status == "Bullish": bullish += 1
-    if bb_signal  == "Oversold": bullish += 1
+    if ma_cross    == "Bullish":  bullish += 1
+    if rsi_signal  == "Oversold": bullish += 1
+    if macd_status == "Bullish":  bullish += 1
+    if bb_signal   == "Oversold": bullish += 1
 
     recommendation = ("BUY"  if bullish >= 3
                       else "SELL" if bullish <= 1
                       else "HOLD")
 
     result = {
+        "sector"        : sector,
+        "sector_name"   : sector_name,
         "current_date"  : str(row['Date'].date()),
         "close_price"   : round(close, 2),
         "change_pct"    : round(change_pct, 2),
@@ -190,11 +215,14 @@ def live_signal():
         ]
     }
 
-    # Cache result for 1 hour
-    _live_cache["data"]      = result
-    _live_cache["timestamp"] = time.time()
+    # Cache result
+    _live_cache[cache_key] = {
+        "data"     : result,
+        "timestamp": time.time()
+    }
 
-    print(f"Live signal: {recommendation} ({bullish}/4 bullish)")
+    print(f"Live signal for {sector_name}: "
+          f"{recommendation} ({bullish}/4 bullish)")
     return result
 
 
@@ -206,10 +234,13 @@ def optimize(req: OptimizeRequest):
     """
     cache    = get_data(
         start_date=req.start_date,
-        end_date=req.end_date
+        end_date=req.end_date,
+        sector=req.sector
     )
     train_df = cache['train_df'].copy()
     test_df  = cache['test_df'].copy()
+
+    sector_name = SECTOR_NAMES.get(req.sector, req.sector)
 
     # Generate transformer signals if enabled
     if req.use_transformer:
@@ -221,7 +252,7 @@ def optimize(req: OptimizeRequest):
         )
 
     # Run GA
-    print("Running GA...")
+    print(f"Running GA on {sector_name}...")
     ga_chrom, ga_history = run_ga(
         train_df,
         pop_size=req.pop_size,
@@ -230,7 +261,7 @@ def optimize(req: OptimizeRequest):
     )
 
     # Run PSO
-    print("Running PSO...")
+    print(f"Running PSO on {sector_name}...")
     pso_chrom, pso_history = run_pso(
         train_df,
         n_particles=req.pop_size,
@@ -270,7 +301,9 @@ def optimize(req: OptimizeRequest):
         },
         "dates"      : ga_result['dates'],
         "start_date" : req.start_date,
-        "end_date"   : req.end_date
+        "end_date"   : req.end_date,
+        "sector"     : req.sector,
+        "sector_name": sector_name
     }
 
 
