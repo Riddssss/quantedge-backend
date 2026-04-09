@@ -1,11 +1,14 @@
 # main.py — FastAPI backend (all endpoints)
 
+import time
+from datetime import date
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
-from data import fetch_data, prepare_data, FEATURE_COLS
+from data import fetch_data, add_indicators, prepare_data, FEATURE_COLS
 from backtest import decode, decode_t, backtest, backtest_with_signal
 from ga import run_ga
 from pso import run_pso
@@ -25,6 +28,9 @@ app.add_middleware(
 
 # In-memory cache — avoids re-downloading data every request
 _cache = {}
+
+# Live signal cache
+_live_cache = {"data": None, "timestamp": None}
 
 
 def get_data(start_date="2007-01-01", end_date="2025-06-01"):
@@ -88,6 +94,108 @@ def options_paper_trade():
 @app.options("/api/transformer-window")
 def options_transformer_window():
     return {}
+
+
+@app.options("/api/live-signal")
+def options_live_signal():
+    return {}
+
+
+@app.get("/api/live-signal")
+def live_signal():
+    """Get today's live market signal for Bank Nifty"""
+
+    # Return cached if less than 1 hour old
+    if (_live_cache["data"] is not None and
+            _live_cache["timestamp"] is not None and
+            time.time() - _live_cache["timestamp"] < 3600):
+        print("Returning cached live signal...")
+        return _live_cache["data"]
+
+    # Fetch latest data up to today
+    today = str(date.today())
+    print(f"Fetching live Bank Nifty data up to {today}...")
+    df = fetch_data(start="2020-01-01", end=today)
+    df = add_indicators(df)
+    df = df.dropna().reset_index(drop=True)
+
+    # Get last two rows
+    row      = df.iloc[-1]
+    prev_row = df.iloc[-2]
+
+    # Extract values
+    close      = float(row['Close'])
+    prev_close = float(prev_row['Close'])
+    change_pct = (close - prev_close) / prev_close * 100
+    rsi_14     = float(row['RSI_14'])
+    sma_50     = float(row['SMA_50'])
+    sma_200    = float(row['SMA_200'])
+    macd       = float(row['MACD'])
+    macd_sig   = float(row['MACD_Sig'])
+    bb_pos     = float(row['BB_Pos'])
+
+    # Compute signals
+    ma_cross    = "Bullish" if sma_50 > sma_200 else "Bearish"
+    rsi_signal  = ("Oversold"   if rsi_14 < 30
+                   else "Overbought" if rsi_14 > 70
+                   else "Neutral")
+    macd_status = "Bullish" if macd > macd_sig else "Bearish"
+    bb_signal   = ("Oversold"   if bb_pos < 0.2
+                   else "Overbought" if bb_pos > 0.8
+                   else "Neutral")
+
+    # Count bullish signals
+    bullish = 0
+    if ma_cross   == "Bullish":  bullish += 1
+    if rsi_signal == "Oversold": bullish += 1
+    if macd_status == "Bullish": bullish += 1
+    if bb_signal  == "Oversold": bullish += 1
+
+    recommendation = ("BUY"  if bullish >= 3
+                      else "SELL" if bullish <= 1
+                      else "HOLD")
+
+    result = {
+        "current_date"  : str(row['Date'].date()),
+        "close_price"   : round(close, 2),
+        "change_pct"    : round(change_pct, 2),
+        "rsi_14"        : round(rsi_14, 2),
+        "rsi_signal"    : rsi_signal,
+        "ma_cross"      : ma_cross,
+        "macd_status"   : macd_status,
+        "bb_signal"     : bb_signal,
+        "bullish_count" : bullish,
+        "recommendation": recommendation,
+        "signals": [
+            {
+                "name"  : "MA Cross (50/200)",
+                "status": ma_cross,
+                "value" : f"SMA50={round(sma_50,0)} SMA200={round(sma_200,0)}"
+            },
+            {
+                "name"  : "RSI 14",
+                "status": rsi_signal,
+                "value" : str(round(rsi_14, 1))
+            },
+            {
+                "name"  : "MACD",
+                "status": macd_status,
+                "value" : f"{round(macd,1)} vs {round(macd_sig,1)}"
+            },
+            {
+                "name"  : "Bollinger Band",
+                "status": bb_signal,
+                "value" : f"Position: {round(bb_pos,2)}"
+            }
+        ]
+    }
+
+    # Cache result for 1 hour
+    _live_cache["data"]      = result
+    _live_cache["timestamp"] = time.time()
+
+    print(f"Live signal: {recommendation} ({bullish}/4 bullish)")
+    return result
 
 
 @app.post("/api/optimize")
